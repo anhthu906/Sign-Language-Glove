@@ -39,3 +39,8 @@ Thumbs.db
 # Build / dist
 build/
 dist/
+
+
+#Claude
+.claude
+CLAUDE.md
