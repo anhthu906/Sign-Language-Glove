@@ -12,12 +12,12 @@ from sklearn.preprocessing import LabelEncoder
 SERIAL_PORT = "/dev/tty.usbmodem101"
 BAUD        = 115200
 
-SAVE_FOLDER = "data_test"
+SAVE_FOLDER = "data/raw/test"
 FRAMES_PER_SAMPLE = 25        # số frame thu 1 mẫu test
 FRAME_DELAY = 0.08            # delay giữa các frame
 
-MODEL_PATH = "model_best.h5"
-LABEL_ENCODER_PATH = "label_classes.npy"
+MODEL_PATH = "results/models/model_best.h5"
+LABEL_ENCODER_PATH = "results/label_classes.npy"
 
 
 LABEL = input("\nNhập ký hiệu cần test model (Tên để lưu file): ")

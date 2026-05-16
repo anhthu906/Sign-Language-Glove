@@ -1,0 +1,17 @@
+tensorflow
+pandas
+numpy
+matplotlib
+seaborn
+scikit-learn
+mediapipe
+opencv-python
+pyserial
+onnx
+onnxruntime
+tf2onnx
+flask
+fastapi
+uvicorn
+pydantic
+jupyter

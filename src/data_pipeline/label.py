@@ -2,7 +2,7 @@ import pandas as pd
 import glob
 import os
 
-folder = "/Users/stella/Downloads/Data Training/data"   # 🔥 đường dẫn đúng đến folder chứa file thu
+folder = "data/raw"   # đường dẫn đến folder chứa file CSV (relative to project root)
 
 files = glob.glob(folder + "/*.csv")
 
