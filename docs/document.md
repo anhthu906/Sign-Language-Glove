@@ -41,7 +41,24 @@ data/raw/Good Data/*.csv
 - Mỗi dòng có 9 cột: `flex1, flex2, flex3, flex4, flex5, imu_x, imu_y, imu_z, SIGN`.
 - **Không có cột `face`** (khác với pipeline cũ trong `src/inference/realtime_predict.py`).
 - Mỗi file có duy nhất 1 nhãn `SIGN`, lặp lại trên mọi dòng.
-- Nhãn hiện có: `baonhieu2`, `test2` (file `C.csv`), `khong?2`, `O2`, `pink4`, `tôi3`, `xinchao0`.
+- Nhãn in-file gốc lộn xộn (mojibake `khong?2`, `C.csv` có `SIGN=test2` không khớp filename, suffix số như `tôi3`, `pink4`…) → cần remap.
+
+### Label remap
+
+Pipeline override `SIGN` in-file bằng nhãn sạch từ `LABEL_REMAP` (cell 4). Key là filename stem sau khi strip phần `_<timestamp>` (regex `_\d+$`):
+
+| File CSV | Key (sau strip) | Nhãn sau remap |
+|---|---|---|
+| `baonhieu2_1778907665.csv` | `baonhieu2` | `bao nhiêu` |
+| `C.csv` | `C` | `C` |
+| `khong_2_1778260100.csv` | `khong_2` | `không` |
+| `O2_1778259175.csv` | `O2` | `O` |
+| `pink4_1778909985.csv` | `pink4` | `pink` |
+| `tôi3_1778496733.csv` | `tôi3` | `tôi` |
+| `xinchao0_1778908228.csv` | `xinchao0` | `xin chào` |
+
+- Strict: thêm CSV mới mà thiếu mapping → `KeyError` (fail-loud, không silent drop).
+- Raw CSV **không bị sửa**; remap chỉ áp dụng trong memory khi load. Muốn đổi nhãn → chỉnh `LABEL_REMAP` trong cell 4 và rerun.
 
 ---
 
@@ -69,6 +86,7 @@ In bảng tóm tắt mỗi CSV: tên file, số dòng, nhãn trong file, có NaN
 
 ### Bước 3 — Cắt window
 
+- Trong loop load CSV, **trước khi gọi `window_recording`**, override `df[SIGN]` bằng `LABEL_REMAP[file_label_key(p)]` → mọi window từ file đó sẽ có nhãn sạch đồng nhất.
 - Hàm `window_recording(df, window, stride)` cắt 1 recording dài thành các đoạn `(20, 8)`, bước trượt 10 (overlap 50%).
 - Nếu trong 1 window có nhiều nhãn khác nhau → bỏ window đó (defensive; không xảy ra với schema hiện tại).
 - NaN trong feature được fill bằng mean cột.
@@ -196,6 +214,6 @@ Input (20, 9)
    - Apply `sin/cos` cho `imu_x` đầu vào từ glove.
    - Load `data/processed/scaler.npz` và apply cùng transform.
 2. **Thu thêm dữ liệu** — hiện mỗi nhãn chỉ có 1 file gốc → leakage trong stratified split. Cần nhiều phiên ghi hơn cho mỗi nhãn để dùng group-aware split.
-3. **Chuẩn hoá label** — `khong?2` có mojibake (Unicode hỏng), `C.csv` có `SIGN=test2` không khớp filename. Cần fix nhãn ngọn nguồn hoặc cleanup khi load.
+3. ~~**Chuẩn hoá label** — `khong?2` có mojibake (Unicode hỏng), `C.csv` có `SIGN=test2` không khớp filename.~~ **Đã xử lý bằng `LABEL_REMAP`** (xem section *Label remap*). Nếu thêm CSV mới với prefix lạ, nhớ thêm entry vào dict.
 4. **Pin requirements** — `requirements.txt` chưa pin version; pin lại sau khi setup environment ổn định.
 5. **Move model + training code ra module Python** — hiện đang inline trong notebook; nên promote ra `src/models/` và `src/training/` để reuse được.
