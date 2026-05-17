@@ -24,10 +24,11 @@ import os
 import sys
 from datetime import datetime
 
-from . import preprocess, stream
-from .buffer import FrameBuffer
-from .parser import parse_flx_line
-from .predictor import Predictor
+from .stage_1_parser import parse_flx_line
+from .stage_2_stream import DEFAULT_BAUD, auto_stream
+from .stage_3_buffer import FrameBuffer
+from .stage_4_preprocess import load_scaler, preprocess_window
+from .stage_5_predictor import Predictor
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.normpath(os.path.join(HERE, "..", ".."))
@@ -42,7 +43,7 @@ def parse_args() -> argparse.Namespace:
     src = p.add_mutually_exclusive_group()
     src.add_argument("--port", help="serial port (e.g. /dev/ttyACM0). Auto-detect if omitted.")
     src.add_argument("--stdin", action="store_true", help="read FLX lines from stdin instead of serial")
-    p.add_argument("--baud", type=int, default=stream.DEFAULT_BAUD)
+    p.add_argument("--baud", type=int, default=DEFAULT_BAUD)
     p.add_argument("--stride", type=int, default=10, help="frames between predictions (default 10, matches training stride)")
     p.add_argument("--model", default=DEFAULT_MODEL)
     p.add_argument("--scaler", default=DEFAULT_SCALER)
@@ -63,12 +64,12 @@ def main() -> int:
     print(f"[init] scaler: {args.scaler}", file=sys.stderr)
     print(f"[init] labels: {args.labels}", file=sys.stderr)
 
-    mean, scale = preprocess.load_scaler(args.scaler)
+    mean, scale = load_scaler(args.scaler)
     predictor = Predictor(args.model, args.labels)
     print(f"[init] classes ({len(predictor.classes)}): {list(predictor.classes)}", file=sys.stderr)
 
     buf = FrameBuffer(stride=args.stride)
-    line_source = stream.auto_stream(args)
+    line_source = auto_stream(args)
 
     print(f"[ready] stride={args.stride}  conf_threshold={args.conf_threshold}", file=sys.stderr)
 
@@ -86,7 +87,7 @@ def main() -> int:
                 last_warmup_print = cur
             continue
 
-        x = preprocess.preprocess_window(buf.as_array(), mean, scale)
+        x = preprocess_window(buf.as_array(), mean, scale)
         pred = predictor.predict(x)
         if pred.confidence >= args.conf_threshold:
             print(format_prediction(pred, datetime.now()), flush=True)
