@@ -1,35 +1,27 @@
-"""Stage 4: normalize flex, cyclic-encode imu_x, and apply the trained StandardScaler.
+"""Stage 4: cyclic-encode imu_x and apply the trained StandardScaler.
 
 Mirrors notebooks/Pipeline.ipynb exactly:
-  raw window (20, 8)  [flex1..5 (int from firmware), imu_x, imu_y, imu_z]
-    --normalize-flex-> (20, 8)  flex_i /= 4095   (match the units the model was trained on)
+  window (20, 8)  [flex1..5 (normalized), imu_x, imu_y, imu_z]
     --cyclic-encode--> (20, 9)  [flex1..5, imu_y, imu_z, sin_imu_x, cos_imu_x]
     --standardize---> (20, 9)   zero-mean / unit-scale
     --batch-axis----> (1, 20, 9) float32
 
-The /4095 step comes from inspecting data/raw/Good Data/*.csv: every flex value
-in the training set is exactly `raw_int / 4095` (12-bit ADC max). The firmware
-(config/main.cpp) emits raw integers, so we must divide here to match training.
+Stage này giả định input flex đã ở khoảng normalized training (~0.001–0.07).
+CSV trong data/raw/Good Data/ đã lưu sẵn dạng này.
+
+TODO (khi cắm glove vật lý lại): kiểm tra xem firmware config/main.cpp gửi raw
+int hay đã normalize. Nếu raw int → thêm `window[:, 0:5] /= 4095.0` ở đầu
+`preprocess_window`. Nếu đã normalize trong firmware → giữ nguyên.
 """
 from __future__ import annotations
 
 import numpy as np
 
-FLEX_DIVISOR = 4095.0  # 12-bit ADC max; matches normalization baked into training CSVs
 ENCODED_FEATURE_COUNT = 9
 EXPECTED_FEATURE_NAMES = (
     "flex1", "flex2", "flex3", "flex4", "flex5",
     "imu_y", "imu_z", "sin_imu_x", "cos_imu_x",
 )
-
-
-def normalize_raw(window: np.ndarray) -> np.ndarray:
-    """Divide the 5 flex columns by FLEX_DIVISOR; leave IMU columns untouched."""
-    if window.ndim != 2 or window.shape[1] != 8:
-        raise ValueError(f"normalize_raw expects (N, 8), got {window.shape}")
-    out = window.astype(np.float32, copy=True)
-    out[:, 0:5] /= FLEX_DIVISOR
-    return out
 
 
 def load_scaler(scaler_path: str) -> tuple[np.ndarray, np.ndarray]:
@@ -68,8 +60,7 @@ def apply_scaler(window_9: np.ndarray, mean: np.ndarray, scale: np.ndarray) -> n
 
 def preprocess_window(raw_window: np.ndarray, mean: np.ndarray, scale: np.ndarray) -> np.ndarray:
     """Full pipeline: (20, 8) raw-from-firmware -> (1, 20, 9) ready for model.predict."""
-    normalized = normalize_raw(raw_window)
-    encoded = cyclic_encode(normalized)
+    encoded = cyclic_encode(raw_window)
     scaled = apply_scaler(encoded, mean, scale)
     return scaled[np.newaxis, ...]
 
@@ -93,11 +84,7 @@ if __name__ == "__main__":
     print(f"\nfinal shape: {x.shape}, dtype: {x.dtype}")
     print(f"per-feature mean after scaling: {x[0].mean(axis=0)}")
 
-    # Sanity: feed a row that matches the first training-CSV row (post-normalize).
-    # baonhieu2 first row raw flex: 31, 11, 5, 3, 15 (= 0.00757, 0.00269, ... × 4095)
-    # imu_x=342.87, imu_y=-13.31, imu_z=39.25
+    # Sanity: feed a row that matches the first training-CSV row.
     firmware_like = np.tile([31, 11, 5, 3, 15, 342.87, -13.31, 39.25], (20, 1)).astype(np.float32)
-    norm = normalize_raw(firmware_like)
-    print(f"\nnormalized flex row 0: {norm[0, 0:5]}  (expect ~0.00757, 0.00269, 0.00122, 0.00073, 0.00366)")
     x2 = preprocess_window(firmware_like, mean, scale)
     print(f"x2 row 0: {x2[0, 0]}  (each value should be small, in [-3, 3] roughly)")
