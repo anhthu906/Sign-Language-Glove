@@ -1,27 +1,43 @@
-"""Stage 4: cyclic-encode imu_x and apply the trained StandardScaler.
+"""Stage 4: normalize flex, cyclic-encode imu_x, and apply the trained StandardScaler.
 
-Mirrors notebooks/Pipeline.ipynb exactly:
-  window (20, 8)  [flex1..5 (normalized), imu_x, imu_y, imu_z]
-    --cyclic-encode--> (20, 9)  [flex1..5, imu_y, imu_z, sin_imu_x, cos_imu_x]
-    --standardize---> (20, 9)   zero-mean / unit-scale
+Mirrors notebooks/Pipeline.ipynb (data was saved after the friend's
+config/realtime_nobno.py applied min-max scaling `(v - 0) / (4095 - 0)` to
+each raw flex int from the glove).
+
+Pipeline A (glove → predict_pipeline.py) chain:
+  raw window (20, 8) [flex1..5 (int from firmware), imu_x, imu_y, imu_z]
+    --normalize-flex-> (20, 8)   flex_i /= 4095        (handled by `preprocess_window`)
+    --cyclic-encode--> (20, 9)   [flex1..5, imu_y, imu_z, sin_imu_x, cos_imu_x]
+    --standardize---> (20, 9)    zero-mean / unit-scale
     --batch-axis----> (1, 20, 9) float32
 
-Stage này giả định input flex đã ở khoảng normalized training (~0.001–0.07).
-CSV trong data/raw/Good Data/ đã lưu sẵn dạng này.
-
-TODO (khi cắm glove vật lý lại): kiểm tra xem firmware config/main.cpp gửi raw
-int hay đã normalize. Nếu raw int → thêm `window[:, 0:5] /= 4095.0` ở đầu
-`preprocess_window`. Nếu đã normalize trong firmware → giữ nguyên.
+Pipeline B (CSV → predict_csv.py) calls `cyclic_encode` + `apply_scaler`
+directly, bypassing `normalize_raw` because training CSVs already store
+flex in normalized units.
 """
 from __future__ import annotations
 
 import numpy as np
 
+FLEX_DIVISOR = 4095.0  # 12-bit ADC max, matches realtime_nobno.py min-max scaling
 ENCODED_FEATURE_COUNT = 9
 EXPECTED_FEATURE_NAMES = (
     "flex1", "flex2", "flex3", "flex4", "flex5",
     "imu_y", "imu_z", "sin_imu_x", "cos_imu_x",
 )
+
+
+def normalize_raw(window: np.ndarray) -> np.ndarray:
+    """Divide the 5 flex columns by FLEX_DIVISOR; leave IMU columns untouched.
+
+    Mirrors `(v - FLEX_MIN) / (FLEX_MAX - FLEX_MIN)` with FLEX_MIN=0, FLEX_MAX=4095
+    from config/realtime_nobno.py (line 36-37, 386-389).
+    """
+    if window.ndim != 2 or window.shape[1] != 8:
+        raise ValueError(f"normalize_raw expects (N, 8), got {window.shape}")
+    out = window.astype(np.float32, copy=True)
+    out[:, 0:5] /= FLEX_DIVISOR
+    return out
 
 
 def load_scaler(scaler_path: str) -> tuple[np.ndarray, np.ndarray]:
@@ -59,8 +75,13 @@ def apply_scaler(window_9: np.ndarray, mean: np.ndarray, scale: np.ndarray) -> n
 
 
 def preprocess_window(raw_window: np.ndarray, mean: np.ndarray, scale: np.ndarray) -> np.ndarray:
-    """Full pipeline: (20, 8) raw-from-firmware -> (1, 20, 9) ready for model.predict."""
-    encoded = cyclic_encode(raw_window)
+    """Full Pipeline A pipeline: (20, 8) raw-from-firmware -> (1, 20, 9) ready for model.predict.
+
+    Includes /4095 normalize. For already-normalized input (CSV), call
+    `cyclic_encode` + `apply_scaler` directly instead.
+    """
+    normalized = normalize_raw(raw_window)
+    encoded = cyclic_encode(normalized)
     scaled = apply_scaler(encoded, mean, scale)
     return scaled[np.newaxis, ...]
 
@@ -74,17 +95,12 @@ if __name__ == "__main__":
     print(f"scaler mean: {mean}")
     print(f"scaler scale: {scale}")
 
-    # Dummy window: all zeros except imu_x = 0 -> sin=0, cos=1
-    raw = np.zeros((20, 8), dtype=np.float32)
-    encoded = cyclic_encode(raw)
-    print(f"\nencoded shape: {encoded.shape}")
-    print(f"encoded row 0: {encoded[0]}  (sin_imu_x=0, cos_imu_x=1 expected)")
+    # Sanity: feed a raw firmware-style row (FLX:120,98,150,77,66,12.45,-3.21,88.00)
+    firmware_like = np.tile([120, 98, 150, 77, 66, 12.45, -3.21, 88.00], (20, 1)).astype(np.float32)
+    norm = normalize_raw(firmware_like)
+    print(f"\nraw row:        {firmware_like[0]}")
+    print(f"after /4095:    {norm[0]}  (flex should be ~0.01-0.04, IMU unchanged)")
 
-    x = preprocess_window(raw, mean, scale)
-    print(f"\nfinal shape: {x.shape}, dtype: {x.dtype}")
-    print(f"per-feature mean after scaling: {x[0].mean(axis=0)}")
-
-    # Sanity: feed a row that matches the first training-CSV row.
-    firmware_like = np.tile([31, 11, 5, 3, 15, 342.87, -13.31, 39.25], (20, 1)).astype(np.float32)
-    x2 = preprocess_window(firmware_like, mean, scale)
-    print(f"x2 row 0: {x2[0, 0]}  (each value should be small, in [-3, 3] roughly)")
+    x = preprocess_window(firmware_like, mean, scale)
+    print(f"\nfinal shape:    {x.shape}, dtype: {x.dtype}")
+    print(f"x row 0:        {x[0, 0]}  (each value should be in [-3, 3] roughly)")

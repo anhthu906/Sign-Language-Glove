@@ -4,17 +4,16 @@ Project có **2 pipeline inference song song**, chia sẻ cùng các stage 4 + 5
 (preprocess + predictor), dùng cùng artifacts (`model_best.h5`, `scaler.npz`,
 `label_classes.npy`) sinh ra từ [notebooks/Pipeline.ipynb](notebooks/Pipeline.ipynb).
 
-| Pipeline | Module | Khi nào dùng |
-|---|---|---|
-| **Realtime (glove)** | [src/inference/predict_pipeline.py](src/inference/predict_pipeline.py) | Khi có glove vật lý cắm USB. Đọc serial / stdin, FLX: parser, rolling buffer, predict liên tục |
-| **Offline (CSV)** | [src/inference/predict_csv.py](src/inference/predict_csv.py) | Khi chỉ có file CSV (test/replay). Đọc thẳng CSV, batched model.predict, in label cho cả file trong 1 call — nhanh hơn nhiều |
+| Pipeline | Module | Input | Khi nào dùng |
+|---|---|---|---|
+| **A — Realtime** | [src/inference/predict_pipeline.py](src/inference/predict_pipeline.py) | Stream `FLX:` thô từ glove (raw int flex, /4095 internally) | Glove cắm USB hoặc script bạn anh truyền liên tục → demo live |
+| **B — Offline CSV** | [src/inference/predict_csv.py](src/inference/predict_csv.py) | File CSV đã normalize | Test 1 file ngay → batched predict cho cả file trong 1 call |
 
 ## Setup môi trường
 
 Cần Python **3.10–3.12** (TensorFlow chưa có wheel cho 3.13+).
 
 ```bash
-cd /home/anchin/Projects/Sign-Language-Glove---AI
 
 python3.12 -m venv .venv
 source .venv/bin/activate
@@ -30,32 +29,60 @@ Thoát venv: `deactivate`.
 
 ---
 
-## Pipeline A — Realtime (glove)
+## Pipeline A — Realtime (glove, RAW FLX in → label out)
 
+Nhận stream `FLX:` thô từ glove qua serial hoặc stdin, predict liên tục, in
+label ra terminal mỗi `stride` frame.
+
+**Input format** (giống firmware [config/main.cpp](config/main.cpp) emit):
 ```
-serial / stdin  →  parser  →  buffer  →  preprocess  →  predictor  →  stdout
-                  (FLX:..)   (rolling   (cyclic-encode   (Keras +
-                              20×8)      + scaler)        LABEL_REMAP)
+FLX:<thumb>,<index>,<middle>,<ring>,<pinky>,<imu_x>,<imu_y>,<imu_z>
 ```
+- 5 flex sensor: **int 0..4095** thô từ ADC (chưa normalize)
+- 3 IMU: float Euler degrees, có thể âm
+- Ví dụ: `FLX:120,98,150,77,66,12.45,-3.21,88.00`
+
+**Chain:**
+```
+serial / stdin  →  parser  →  buffer  →  preprocess           →  predictor  →  stdout
+                  (FLX:..)   (rolling   (/4095 + cyclic-encode     (Keras +
+                              20×8)      + StandardScaler)          LABEL_REMAP)
+```
+
+Step `/4095` mirror `(v - 0) / (4095 - 0)` trong [config/realtime_nobno.py:36-37, 386-389](config/realtime_nobno.py) — chính file bạn anh dùng để chuyển raw glove signal thành CSV training.
 
 | Stage | File |
 |---|---|
 | 1. Parse 1 dòng `FLX:` → 8 float | [stage_1_parser.py](src/inference/stage_1_parser.py) |
 | 2. Iterator yield dòng từ pyserial/stdin | [stage_2_stream.py](src/inference/stage_2_stream.py) |
 | 3. Rolling window 20 frame + stride trigger | [stage_3_buffer.py](src/inference/stage_3_buffer.py) |
-| 4. Cyclic-encode `imu_x`, áp StandardScaler | [stage_4_preprocess.py](src/inference/stage_4_preprocess.py) |
+| 4. `/4095` flex + cyclic-encode `imu_x` + StandardScaler | [stage_4_preprocess.py](src/inference/stage_4_preprocess.py) |
 | 5. Load model + predict + remap | [stage_5_predictor.py](src/inference/stage_5_predictor.py) |
 | Compose | [predict_pipeline.py](src/inference/predict_pipeline.py) |
 
 ### Chạy
 
+**Với glove vật lý:**
 ```bash
-# Glove cắm USB (auto-detect /dev/ttyACM0 → /dev/ttyUSB0)
+# Auto-detect /dev/ttyACM0 → /dev/ttyUSB0
 python3 -m src.inference.predict_pipeline
 
 # Chỉ định port
 python3 -m src.inference.predict_pipeline --port /dev/ttyACM0
 ```
+
+**Test bằng cách truyền FLX qua stdin** (vd từ script bạn anh hoặc replay):
+```bash
+# Pipe trực tiếp các dòng FLX:
+echo "FLX:120,98,150,77,66,12.45,-3.21,88.00" | python3 -m src.inference.predict_pipeline --stdin
+
+# Stream liên tục từ script bạn anh
+python3 your_glove_streamer.py | python3 -m src.inference.predict_pipeline --stdin
+```
+
+Module sẽ:
+1. Skip 20 frame đầu (warmup, in `[warmup 5/20]`, `[warmup 10/20]`… ra stderr)
+2. Sau đó mỗi `--stride` frame (mặc định 10) → in 1 prediction ra stdout
 
 ### Tham số CLI
 
@@ -172,16 +199,6 @@ thì update LABEL_REMAP ở cả 2 nơi.
 | `results/models/model_best.h5` | [notebooks/Pipeline.ipynb](notebooks/Pipeline.ipynb) |
 | `data/processed/scaler.npz` | [notebooks/Pipeline.ipynb](notebooks/Pipeline.ipynb) |
 | `data/processed/label_classes.npy` | [notebooks/Pipeline.ipynb](notebooks/Pipeline.ipynb) |
-
-## TODO — khi cắm lại glove vật lý
-
-Hiện tại [stage_4_preprocess.py](src/inference/stage_4_preprocess.py) giả định
-input flex đã ở đơn vị normalized (~0.001–0.07), khớp với CSV training.
-
-Khi kết nối glove ([config/main.cpp](config/main.cpp)) và muốn dùng Pipeline A
-trở lại, kiểm tra:
-- Nếu firmware gửi **raw int** (hiện tại `abs((int)fThumb - offsetThumb)`) → thêm `window[:, 0:5] /= 4095.0` ở đầu `preprocess_window`
-- Nếu firmware đã normalize sẵn → giữ nguyên
 
 ## Khác biệt so với realtime_predict.py cũ
 
